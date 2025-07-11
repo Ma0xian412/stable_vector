@@ -33,7 +33,7 @@ private:
     double tick_size_;
     size_type total_levels_;
     
-    // Internal storage for key-value pairs - pre-allocated to exact size
+    // Internal storage for key-value pairs
     stable_vector<internal_value_type> data_;
     
     // Track which indices contain valid data
@@ -248,8 +248,8 @@ public:
         
         // Initialize storage and tracking but don't pre-allocate
         // Let stable_vector grow naturally as needed
-        data_.reserve(total_levels_);
-        occupied_.resize(total_levels_, false);
+        data_.reserve(1000);  // Reserve some reasonable initial capacity
+        occupied_.resize(total_levels_, 0);  // 0 = false, 1 = true
     }
     
     price_map(std::initializer_list<value_type> init, double opening_price, double up_limit_pct, double down_limit_pct, double tick_size)
@@ -331,16 +331,20 @@ public:
         size_type index = price_to_index(key);
         
         // Ensure the stable_vector has enough elements
+        // Use careful growth to avoid string initialization issues
         while (data_.size() <= index)
         {
-            data_.emplace_back(index_to_price(data_.size()), T{});
+            // Create a default element with proper initialization
+            double dummy_price = index_to_price(data_.size());
+            data_.emplace_back(std::make_pair(dummy_price, T{}));
         }
         
         if (!occupied_[index])
         {
-            // Insert new element
-            data_[index] = internal_value_type(key, T{});
-            occupied_[index] = true;
+            // Initialize the element properly
+            data_[index].first = key;
+            data_[index].second = T{};
+            occupied_[index] = 1;
             ++size_count_;
         }
         
@@ -396,7 +400,8 @@ public:
         // Ensure the stable_vector has enough elements
         while (data_.size() <= index)
         {
-            data_.emplace_back(index_to_price(data_.size()), T{});
+            double dummy_price = index_to_price(data_.size());
+            data_.emplace_back(std::make_pair(dummy_price, T{}));
         }
         
         if (occupied_[index])
@@ -406,8 +411,9 @@ public:
         }
         
         // Insert new element
-        data_[index] = internal_value_type(key, value);
-        occupied_[index] = true;
+        data_[index].first = key;
+        data_[index].second = value;
+        occupied_[index] = 1;
         ++size_count_;
         
         return std::make_pair(iterator(this, index), true);
@@ -426,7 +432,8 @@ public:
         // Ensure the stable_vector has enough elements
         while (data_.size() <= index)
         {
-            data_.emplace_back(index_to_price(data_.size()), T{});
+            double dummy_price = index_to_price(data_.size());
+            data_.emplace_back(std::make_pair(dummy_price, T{}));
         }
         
         if (occupied_[index])
@@ -436,8 +443,9 @@ public:
         }
         
         // Insert new element
-        data_[index] = internal_value_type(key, T(std::forward<Args>(args)...));
-        occupied_[index] = true;
+        data_[index].first = key;
+        data_[index].second = T(std::forward<Args>(args)...);
+        occupied_[index] = 1;
         ++size_count_;
         
         return std::make_pair(iterator(this, index), true);
@@ -457,7 +465,7 @@ public:
         }
         
         // Mark as unoccupied
-        occupied_[index] = false;
+        occupied_[index] = 0;
         --size_count_;
         return 1;
     }
@@ -473,7 +481,7 @@ public:
         
         if (occupied_[index])
         {
-            occupied_[index] = false;
+            occupied_[index] = 0;
             --size_count_;
         }
         
@@ -484,7 +492,7 @@ public:
     
     void clear() noexcept
     {
-        std::fill(occupied_.begin(), occupied_.end(), false);
+        std::fill(occupied_.begin(), occupied_.end(), 0);
         size_count_ = 0;
     }
     
