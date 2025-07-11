@@ -1,0 +1,4 @@
+build/
+*.o
+*.exe
+simple_test
