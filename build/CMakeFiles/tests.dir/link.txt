@@ -1,0 +1,1 @@
+/usr/bin/c++  -g -Wall -Wextra -Wpedantic -Wconversion -Wswitch-enum -Wunreachable-code -Wwrite-strings -Wcast-align -Wshadow -Wundef -Wold-style-cast -Wshadow -Wdouble-promotion -rdynamic -Wl,--dependency-file=CMakeFiles/tests.dir/link.d CMakeFiles/tests.dir/unit_tests.cc.o -o tests  libgtest.a
