@@ -1,11 +1,12 @@
 #pragma once
 
 #include "stable_vector.h"
-#include <unordered_map>
 #include <utility>
 #include <stdexcept>
 #include <functional>
 #include <vector>
+#include <cmath>
+#include <limits>
 
 template <typename T>
 class price_map
@@ -25,14 +26,64 @@ private:
     // Internal storage type - using non-const key for assignment
     using internal_value_type = std::pair<double, T>;
     
-    // Internal storage for key-value pairs
+    // Price book configuration
+    double opening_price_;
+    double min_price_;
+    double max_price_;
+    double tick_size_;
+    size_type total_levels_;
+    
+    // Internal storage for key-value pairs - pre-allocated to exact size
     stable_vector<internal_value_type> data_;
     
-    // Hash map for O(1) key-to-index lookup  
-    std::unordered_map<double, size_type> key_to_index_;
+    // Track which indices contain valid data
+    std::vector<char> occupied_;  // Using char instead of bool to avoid vector<bool> issues
+    size_type size_count_;
     
-    // Track deleted indices for reuse (since stable_vector doesn't support deletion)
-    std::vector<size_type> deleted_indices_;
+    // Convert price to array index using mathematical mapping
+    size_type price_to_index(double price) const
+    {
+        if (price < min_price_ || price > max_price_)
+        {
+            throw std::out_of_range("Price outside valid range");
+        }
+        
+        // Calculate index based on offset from min_price and tick_size
+        double offset = price - min_price_;
+        size_type index = static_cast<size_type>(std::round(offset / tick_size_));
+        
+        // Ensure we don't exceed bounds due to floating point precision
+        if (index >= total_levels_)
+        {
+            index = total_levels_ - 1;
+        }
+        
+        return index;
+    }
+    
+    // Convert array index back to price
+    double index_to_price(size_type index) const
+    {
+        if (index >= total_levels_)
+        {
+            throw std::out_of_range("Index outside valid range");
+        }
+        
+        return min_price_ + (index * tick_size_);
+    }
+    
+    // Validate that a price is properly aligned to tick size
+    bool is_valid_price(double price) const
+    {
+        if (price < min_price_ || price > max_price_)
+        {
+            return false;
+        }
+        
+        double offset = price - min_price_;
+        double ticks = offset / tick_size_;
+        return std::abs(ticks - std::round(ticks)) < 1e-9; // Small epsilon for floating point comparison
+    }
 
 public:
     // Iterator implementation
@@ -47,23 +98,16 @@ public:
         iterator(price_map* container, size_type index)
             : container_(container), index_(index)
         {
-            // Skip deleted entries
-            skip_deleted();
+            // Skip unoccupied entries
+            skip_unoccupied();
         }
         
-        void skip_deleted()
+        void skip_unoccupied()
         {
-            while (index_ < container_->data_.size() && is_deleted())
+            while (index_ < container_->data_.size() && !container_->occupied_[index_])
             {
                 ++index_;
             }
-        }
-        
-        bool is_deleted() const
-        {
-            return std::find(container_->deleted_indices_.begin(), 
-                           container_->deleted_indices_.end(), 
-                           index_) != container_->deleted_indices_.end();
         }
         
     public:
@@ -75,13 +119,20 @@ public:
         
         iterator() : container_(nullptr), index_(0) {}
         
-        reference operator*() { return reinterpret_cast<reference>(container_->data_[index_]); }
-        pointer operator->() { return reinterpret_cast<pointer>(&container_->data_[index_]); }
+        reference operator*() { 
+            // Create a reference to the internal pair, but cast the key to const
+            auto& internal_pair = container_->data_[index_];
+            return *reinterpret_cast<pointer>(&internal_pair);
+        }
+        pointer operator->() { 
+            auto& internal_pair = container_->data_[index_];
+            return reinterpret_cast<pointer>(&internal_pair);
+        }
         
         iterator& operator++()
         {
             ++index_;
-            skip_deleted();
+            skip_unoccupied();
             return *this;
         }
         
@@ -114,22 +165,15 @@ public:
         const_iterator(const price_map* container, size_type index)
             : container_(container), index_(index)
         {
-            skip_deleted();
+            skip_unoccupied();
         }
         
-        void skip_deleted()
+        void skip_unoccupied()
         {
-            while (index_ < container_->data_.size() && is_deleted())
+            while (index_ < container_->data_.size() && !container_->occupied_[index_])
             {
                 ++index_;
             }
-        }
-        
-        bool is_deleted() const
-        {
-            return std::find(container_->deleted_indices_.begin(), 
-                           container_->deleted_indices_.end(), 
-                           index_) != container_->deleted_indices_.end();
         }
         
     public:
@@ -142,13 +186,19 @@ public:
         const_iterator() : container_(nullptr), index_(0) {}
         const_iterator(const iterator& it) : container_(it.container_), index_(it.index_) {}
         
-        reference operator*() const { return reinterpret_cast<reference>(container_->data_[index_]); }
-        pointer operator->() const { return reinterpret_cast<pointer>(&container_->data_[index_]); }
+        reference operator*() const { 
+            auto& internal_pair = container_->data_[index_];
+            return *reinterpret_cast<pointer>(&internal_pair);
+        }
+        pointer operator->() const { 
+            auto& internal_pair = container_->data_[index_];
+            return reinterpret_cast<pointer>(&internal_pair);
+        }
         
         const_iterator& operator++()
         {
             ++index_;
-            skip_deleted();
+            skip_unoccupied();
             return *this;
         }
         
@@ -171,9 +221,39 @@ public:
     };
 
     // Constructors
-    price_map() = default;
+    price_map() = delete; // Require price parameters
     
-    price_map(std::initializer_list<value_type> init)
+    // Constructor with price book parameters
+    price_map(double opening_price, double up_limit_pct, double down_limit_pct, double tick_size)
+        : opening_price_(opening_price)
+        , tick_size_(tick_size)
+        , size_count_(0)
+    {
+        if (tick_size <= 0.0)
+        {
+            throw std::invalid_argument("Tick size must be positive");
+        }
+        if (up_limit_pct < 0.0 || down_limit_pct < 0.0)
+        {
+            throw std::invalid_argument("Limit percentages must be non-negative");
+        }
+        
+        // Calculate price range
+        min_price_ = opening_price * (1.0 - down_limit_pct / 100.0);
+        max_price_ = opening_price * (1.0 + up_limit_pct / 100.0);
+        
+        // Calculate total number of price levels
+        double price_range = max_price_ - min_price_;
+        total_levels_ = static_cast<size_type>(std::ceil(price_range / tick_size_)) + 1;
+        
+        // Initialize storage and tracking but don't pre-allocate
+        // Let stable_vector grow naturally as needed
+        data_.reserve(total_levels_);
+        occupied_.resize(total_levels_, false);
+    }
+    
+    price_map(std::initializer_list<value_type> init, double opening_price, double up_limit_pct, double down_limit_pct, double tick_size)
+        : price_map(opening_price, up_limit_pct, down_limit_pct, tick_size)
     {
         for (const auto& item : init)
         {
@@ -184,65 +264,86 @@ public:
     // Capacity
     bool empty() const noexcept
     {
-        return size() == 0;
+        return size_count_ == 0;
     }
     
     size_type size() const noexcept
     {
-        return key_to_index_.size();
+        return size_count_;
     }
     
     size_type max_size() const noexcept
     {
-        return data_.max_size();
+        return total_levels_;
     }
+    
+    size_type capacity() const noexcept
+    {
+        return total_levels_;
+    }
+    
+    // Price book specific information
+    double min_price() const noexcept { return min_price_; }
+    double max_price() const noexcept { return max_price_; }
+    double tick_size() const noexcept { return tick_size_; }
+    double opening_price() const noexcept { return opening_price_; }
     
     // Element access
     T& at(const double& key)
     {
-        auto it = key_to_index_.find(key);
-        if (it == key_to_index_.end())
+        if (!is_valid_price(key))
         {
-            throw std::out_of_range("price_map::at");
+            throw std::out_of_range("Invalid price or price outside range");
         }
-        return data_[it->second].second;
+        
+        size_type index = price_to_index(key);
+        if (!occupied_[index])
+        {
+            throw std::out_of_range("price_map::at - key not found");
+        }
+        
+        return data_[index].second;
     }
     
     const T& at(const double& key) const
     {
-        auto it = key_to_index_.find(key);
-        if (it == key_to_index_.end())
+        if (!is_valid_price(key))
         {
-            throw std::out_of_range("price_map::at");
+            throw std::out_of_range("Invalid price or price outside range");
         }
-        return data_[it->second].second;
+        
+        size_type index = price_to_index(key);
+        if (!occupied_[index])
+        {
+            throw std::out_of_range("price_map::at - key not found");
+        }
+        
+        return data_[index].second;
     }
     
     T& operator[](const double& key)
     {
-        auto it = key_to_index_.find(key);
-        if (it != key_to_index_.end())
+        if (!is_valid_price(key))
         {
-            return data_[it->second].second;
+            throw std::out_of_range("Invalid price or price outside range");
         }
         
-        // Insert new element
-        size_type index;
-        if (!deleted_indices_.empty())
+        size_type index = price_to_index(key);
+        
+        // Ensure the stable_vector has enough elements
+        while (data_.size() <= index)
         {
-            // Reuse deleted index
-            index = deleted_indices_.back();
-            deleted_indices_.pop_back();
+            data_.emplace_back(index_to_price(data_.size()), T{});
+        }
+        
+        if (!occupied_[index])
+        {
+            // Insert new element
             data_[index] = internal_value_type(key, T{});
-        }
-        else
-        {
-            // Add new element
-            index = data_.size();
-            data_.emplace_back(key, T{});
+            occupied_[index] = true;
+            ++size_count_;
         }
         
-        key_to_index_[key] = index;
         return data_[index].second;
     }
     
@@ -285,72 +386,79 @@ public:
     
     std::pair<iterator, bool> insert(const double& key, const T& value)
     {
-        auto it = key_to_index_.find(key);
-        if (it != key_to_index_.end())
+        if (!is_valid_price(key))
+        {
+            throw std::out_of_range("Invalid price or price outside range");
+        }
+        
+        size_type index = price_to_index(key);
+        
+        // Ensure the stable_vector has enough elements
+        while (data_.size() <= index)
+        {
+            data_.emplace_back(index_to_price(data_.size()), T{});
+        }
+        
+        if (occupied_[index])
         {
             // Key already exists
-            return std::make_pair(iterator(this, it->second), false);
+            return std::make_pair(iterator(this, index), false);
         }
         
-        size_type index;
-        if (!deleted_indices_.empty())
-        {
-            // Reuse deleted index
-            index = deleted_indices_.back();
-            deleted_indices_.pop_back();
-            data_[index] = internal_value_type(key, value);
-        }
-        else
-        {
-            // Add new element
-            index = data_.size();
-            data_.emplace_back(key, value);
-        }
+        // Insert new element
+        data_[index] = internal_value_type(key, value);
+        occupied_[index] = true;
+        ++size_count_;
         
-        key_to_index_[key] = index;
         return std::make_pair(iterator(this, index), true);
     }
     
     template<class... Args>
     std::pair<iterator, bool> emplace(const double& key, Args&&... args)
     {
-        auto it = key_to_index_.find(key);
-        if (it != key_to_index_.end())
+        if (!is_valid_price(key))
+        {
+            throw std::out_of_range("Invalid price or price outside range");
+        }
+        
+        size_type index = price_to_index(key);
+        
+        // Ensure the stable_vector has enough elements
+        while (data_.size() <= index)
+        {
+            data_.emplace_back(index_to_price(data_.size()), T{});
+        }
+        
+        if (occupied_[index])
         {
             // Key already exists
-            return std::make_pair(iterator(this, it->second), false);
+            return std::make_pair(iterator(this, index), false);
         }
         
-        size_type index;
-        if (!deleted_indices_.empty())
-        {
-            // Reuse deleted index
-            index = deleted_indices_.back();
-            deleted_indices_.pop_back();
-            data_[index] = internal_value_type(key, T(std::forward<Args>(args)...));
-        }
-        else
-        {
-            // Add new element
-            index = data_.size();
-            data_.emplace_back(key, T(std::forward<Args>(args)...));
-        }
+        // Insert new element
+        data_[index] = internal_value_type(key, T(std::forward<Args>(args)...));
+        occupied_[index] = true;
+        ++size_count_;
         
-        key_to_index_[key] = index;
         return std::make_pair(iterator(this, index), true);
     }
     
     size_type erase(const double& key)
     {
-        auto it = key_to_index_.find(key);
-        if (it == key_to_index_.end())
+        if (!is_valid_price(key))
         {
             return 0;
         }
         
-        // Mark index as deleted
-        deleted_indices_.push_back(it->second);
-        key_to_index_.erase(it);
+        size_type index = price_to_index(key);
+        if (!occupied_[index])
+        {
+            return 0;
+        }
+        
+        // Mark as unoccupied
+        occupied_[index] = false;
+        --size_count_;
         return 1;
     }
     
@@ -361,12 +469,13 @@ public:
             return end();
         }
         
-        double key = pos->first;
         size_type index = pos.index_;
         
-        // Mark index as deleted
-        deleted_indices_.push_back(index);
-        key_to_index_.erase(key);
+        if (occupied_[index])
+        {
+            occupied_[index] = false;
+            --size_count_;
+        }
         
         // Return iterator to next valid element
         iterator next_it(this, index + 1);
@@ -375,44 +484,63 @@ public:
     
     void clear() noexcept
     {
-        key_to_index_.clear();
-        deleted_indices_.clear();
-        // Note: stable_vector doesn't have clear(), so we just mark all as deleted
-        for (size_type i = 0; i < data_.size(); ++i)
-        {
-            deleted_indices_.push_back(i);
-        }
+        std::fill(occupied_.begin(), occupied_.end(), false);
+        size_count_ = 0;
     }
     
     // Lookup
     iterator find(const double& key)
     {
-        auto it = key_to_index_.find(key);
-        if (it == key_to_index_.end())
+        if (!is_valid_price(key))
         {
             return end();
         }
-        return iterator(this, it->second);
+        
+        size_type index = price_to_index(key);
+        if (!occupied_[index])
+        {
+            return end();
+        }
+        
+        return iterator(this, index);
     }
     
     const_iterator find(const double& key) const
     {
-        auto it = key_to_index_.find(key);
-        if (it == key_to_index_.end())
+        if (!is_valid_price(key))
         {
             return end();
         }
-        return const_iterator(this, it->second);
+        
+        size_type index = price_to_index(key);
+        if (!occupied_[index])
+        {
+            return end();
+        }
+        
+        return const_iterator(this, index);
     }
     
     size_type count(const double& key) const
     {
-        return key_to_index_.count(key);
+        if (!is_valid_price(key))
+        {
+            return 0;
+        }
+        
+        size_type index = price_to_index(key);
+        return occupied_[index] ? 1 : 0;
     }
     
     bool contains(const double& key) const
     {
-        return key_to_index_.find(key) != key_to_index_.end();
+        if (!is_valid_price(key))
+        {
+            return false;
+        }
+        
+        size_type index = price_to_index(key);
+        return occupied_[index];
     }
     
     // Comparison operators
