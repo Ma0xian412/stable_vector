@@ -7,9 +7,8 @@
 #include <iterator>
 #include <algorithm>
 #include <numeric>
-
-#include <boost/operators.hpp>
-#include <boost/container/static_vector.hpp>
+#include <limits>
+#include <cassert>
 
 #define likely_false(x) __builtin_expect((x), 0)
 #define likely_true(x)  __builtin_expect((x), 1)
@@ -63,21 +62,51 @@ private:
 public:
 	struct const_iterator;
 
-	struct iterator :
-		public iterator_base<__self>,
-		public boost::random_access_iterator_helper<iterator, value_type>
+	struct iterator : public iterator_base<__self>
 	{
 		using iterator_base<__self>::iterator_base;
+		using iterator_base<__self>::operator++;
+		using iterator_base<__self>::operator--;
+		using iterator_base<__self>::operator+=;
+		using iterator_base<__self>::operator-=;
 		friend struct const_iterator;
 
+		// Iterator traits
+		using iterator_category = std::random_access_iterator_tag;
+		using value_type = T;
+		using difference_type = std::ptrdiff_t;
+		using pointer = T*;
+		using reference = T&;
+
 		reference operator*() { return (*this->m_container)[this->m_index]; }
+		
+		iterator operator+(size_type n) const { iterator it = *this; it += n; return it; }
+		iterator operator-(size_type n) const { iterator it = *this; it -= n; return it; }
+		iterator operator++(int) { iterator it = *this; ++(*this); return it; }
+		iterator operator--(int) { iterator it = *this; --(*this); return it; }
+		
+		bool operator!=(const iterator& it) const { return !(*this == it); }
+		bool operator<=(const iterator& it) const { return *this < it || *this == it; }
+		bool operator>(const iterator& it) const { return !(*this <= it); }
+		bool operator>=(const iterator& it) const { return !(*this < it); }
+		
+		reference operator[](size_type n) { return *(*this + n); }
 	};
 
-	struct const_iterator :
-		public iterator_base<__const_self>,
-		public boost::random_access_iterator_helper<const_iterator, const value_type>
+	struct const_iterator : public iterator_base<__const_self>
 	{
 		using iterator_base<__const_self>::iterator_base;
+		using iterator_base<__const_self>::operator++;
+		using iterator_base<__const_self>::operator--;
+		using iterator_base<__const_self>::operator+=;
+		using iterator_base<__const_self>::operator-=;
+
+		// Iterator traits
+		using iterator_category = std::random_access_iterator_tag;
+		using value_type = T;
+		using difference_type = std::ptrdiff_t;
+		using pointer = const T*;
+		using reference = const T&;
 
 		const_iterator(const iterator& it) :
 			iterator_base<__const_self>(it.m_container, it.m_index)
@@ -92,6 +121,28 @@ public:
 		}
 
 		friend bool operator==(const iterator& l, const const_iterator& r) { return r == l; }
+		
+		const_iterator operator+(size_type n) const { const_iterator it = *this; it += n; return it; }
+		const_iterator operator-(size_type n) const { const_iterator it = *this; it -= n; return it; }
+		const_iterator operator++(int) { const_iterator it = *this; ++(*this); return it; }
+		const_iterator operator--(int) { const_iterator it = *this; --(*this); return it; }
+		
+		bool operator!=(const const_iterator& it) const { return !(*this == it); }
+		bool operator<=(const const_iterator& it) const { return *this < it || *this == it; }
+		bool operator>(const const_iterator& it) const { return !(*this <= it); }
+		bool operator>=(const const_iterator& it) const { return !(*this < it); }
+		
+		const_reference operator[](size_type n) const { return *(*this + n); }
+		
+		// Cross-type comparisons
+		bool operator!=(const iterator& it) const { return !(*this == it); }
+		bool operator<(const iterator& it) const { 
+			assert(this->m_container == it.m_container); 
+			return this->m_index < it.m_index; 
+		}
+		bool operator<=(const iterator& it) const { return *this < it || *this == it; }
+		bool operator>(const iterator& it) const { return !(*this <= it); }
+		bool operator>=(const iterator& it) const { return !(*this < it); }
 	};
 
 	stable_vector() = default;
@@ -153,8 +204,107 @@ public:
 
 	const_reference at(size_type i) const;
 
+	template <class U, std::size_t N>
+	class static_vector {
+	public:
+		using value_type = U;
+		using reference = U&;
+		using const_reference = const U&;
+		using size_type = std::size_t;
+		
+		static_vector() = default;
+		
+		~static_vector() {
+			for (size_type i = 0; i < m_size; ++i) {
+				data()[i].~U();
+			}
+		}
+		
+		static_vector(const static_vector& other) : m_size(other.m_size) {
+			for (size_type i = 0; i < m_size; ++i) {
+				new(data() + i) U(other.data()[i]);
+			}
+		}
+		
+		static_vector& operator=(const static_vector& other) {
+			if (this != &other) {
+				// Destroy existing elements
+				for (size_type i = 0; i < m_size; ++i) {
+					data()[i].~U();
+				}
+				m_size = other.m_size;
+				// Copy construct new elements
+				for (size_type i = 0; i < m_size; ++i) {
+					new(data() + i) U(other.data()[i]);
+				}
+			}
+			return *this;
+		}
+		
+		static_vector(static_vector&& other) noexcept : m_size(other.m_size) {
+			for (size_type i = 0; i < m_size; ++i) {
+				new(data() + i) U(std::move(other.data()[i]));
+				other.data()[i].~U();
+			}
+			other.m_size = 0;
+		}
+		
+		static_vector& operator=(static_vector&& other) noexcept {
+			if (this != &other) {
+				// Destroy existing elements
+				for (size_type i = 0; i < m_size; ++i) {
+					data()[i].~U();
+				}
+				m_size = other.m_size;
+				// Move construct new elements
+				for (size_type i = 0; i < m_size; ++i) {
+					new(data() + i) U(std::move(other.data()[i]));
+					other.data()[i].~U();
+				}
+				other.m_size = 0;
+			}
+			return *this;
+		}
+		
+		size_type size() const noexcept { return m_size; }
+		size_type capacity() const noexcept { return N; }
+		bool empty() const noexcept { return m_size == 0; }
+		
+		reference front() { return data()[0]; }
+		const_reference front() const { return data()[0]; }
+		
+		reference back() { return data()[m_size - 1]; }
+		const_reference back() const { return data()[m_size - 1]; }
+		
+		reference operator[](size_type i) { return data()[i]; }
+		const_reference operator[](size_type i) const { return data()[i]; }
+		
+		void push_back(const U& value) {
+			new(data() + m_size) U(value);
+			++m_size;
+		}
+		
+		void push_back(U&& value) {
+			new(data() + m_size) U(std::move(value));
+			++m_size;
+		}
+		
+		template<class... Args>
+		void emplace_back(Args&&... args) {
+			new(data() + m_size) U(std::forward<Args>(args)...);
+			++m_size;
+		}
+		
+	private:
+		U* data() { return reinterpret_cast<U*>(m_storage); }
+		const U* data() const { return reinterpret_cast<const U*>(m_storage); }
+		
+		alignas(U) char m_storage[sizeof(U) * N];
+		size_type m_size = 0;
+	};
+
 private:
-	using chunk_type = boost::container::static_vector<T, ChunkSize>;
+	using chunk_type = static_vector<T, ChunkSize>;
 	using storage_type = std::vector<std::unique_ptr<chunk_type>>;
 
 	void add_chunk();

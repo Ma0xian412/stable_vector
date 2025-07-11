@@ -1,7 +1,5 @@
 #include "stable_vector.h"
 
-#include <boost/noncopyable.hpp>
-#include <boost/container/stable_vector.hpp>
 #include <gtest/gtest.h>
 
 #include <list>
@@ -16,9 +14,13 @@ struct A
 	int m_i;
 };
 
-struct B : A, boost::noncopyable
+struct B : A
 {
 	using A::A;
+	
+	// Make non-copyable
+	B(const B&) = delete;
+	B& operator=(const B&) = delete;
 };
 
 template <bool NoExcept = false>
@@ -397,23 +399,9 @@ TEST(stable_vector_iterator, performance)
 	EXPECT_EQ(ElementsCount, s);
 }
 
-TEST(boost_stable_vector_iterator, performance)
-{
-	boost::container::stable_vector<int> v(ElementsCount, 1);
-	int s = sum(v);
-	EXPECT_EQ(ElementsCount, s);
-}
-
-TEST(list_iterator, performance)
-{
-	std::list<int> v(ElementsCount, 1);
-	int s = sum(v);
-	EXPECT_EQ(ElementsCount, s);
-}
-
 TEST(std_vector_iterator, performance)
 {
-	std::vector<int> v(10000000, 1);
+	std::vector<int> v(ElementsCount, 1);
 	int s = sum(v);
 	std::cout << s << std::endl;
 }
