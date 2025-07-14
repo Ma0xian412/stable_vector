@@ -2,3 +2,9 @@ build/
 *.o
 *.exe
 simple_test
+comprehensive_test
+comprehensive_test_strict
+unit_test_simple
+price_map_test
+price_map_example
+comparison_test
